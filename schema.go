@@ -1,5 +1,6 @@
 package main
 
+// GetPhotosResponse describes VK API response for photos.get
 type GetPhotosResponse struct {
 	Response struct {
 		Count int `json:"count"`
