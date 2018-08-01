@@ -11,30 +11,54 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 )
 
 //TODO Check for VK API errors when parsing JSON
 
 // APIVersion is vk.com API version
 const APIVersion = "5.80"
+const retryLimit = 5
+const defaultWaitTime = 5 * time.Second
+const waitFactor = 3
 
-func getPhotosList(album string, accessToken string) (*GetPhotosResponse, error) {
-	client := http.DefaultClient
-	r, err := client.Get(fmt.Sprintf("https://api.vk.com/method/photos.get?access_token=%s&v=%s&album_id=%s",
-		accessToken, APIVersion, album))
+func apiRequest(url string, out interface{}) error {
+	r, err := http.DefaultClient.Get(url)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	defer r.Body.Close()
 	data, err := ioutil.ReadAll(r.Body)
 	if err != nil {
-		return nil, err
+		return err
 	}
+	if err = json.Unmarshal(data, &out); err != nil {
+		return err
+	}
+	return nil
+}
+
+func getPhotosList(album string, accessToken string) (*GetPhotosResponse, error) {
+	url := fmt.Sprintf("https://api.vk.com/method/photos.get?access_token=%s&v=%s&album_id=%s",
+		accessToken, APIVersion, album)
 	var photos GetPhotosResponse
-	if err = json.Unmarshal(data, &photos); err != nil {
+	if err := apiRequest(url, &photos); err != nil {
 		return nil, err
 	}
 	return &photos, nil
+}
+
+func deletePhoto(accessToken string, photo Photo) error {
+	url := fmt.Sprintf("https://api.vk.com/method/photos.delete?access_token=%s&v=%s&owner_id=%d&photo_id=%d",
+		accessToken, APIVersion, photo.OwnerID, photo.ID)
+	var parsedReponse DeletePhotoResponse
+	if err := apiRequest(url, &parsedReponse); err != nil {
+		return err
+	}
+	if parsedReponse.Response != 1 {
+		return fmt.Errorf("photos.delete returned invaild result (not 0)")
+	}
+	return nil
 }
 
 func download(url, dest string) error {
@@ -43,8 +67,7 @@ func download(url, dest string) error {
 		return err
 	}
 	defer r.Body.Close()
-	name := url[strings.LastIndex(url, "/")+1:]
-	f, err := os.OpenFile(filepath.Join(dest, name), os.O_RDWR|os.O_CREATE, 0644)
+	f, err := os.OpenFile(dest, os.O_RDWR|os.O_CREATE, 0644)
 	if err != nil {
 		return err
 	}
@@ -54,13 +77,17 @@ func download(url, dest string) error {
 }
 
 func downloadPhotos(accessToken string, photos *GetPhotosResponse, dest string) error {
-	for _, photo := range photos.Response.Items {
+	for i, photo := range photos.Response.Items {
 		sort.Slice(photo.Sizes, func(i, j int) bool {
 			return (photo.Sizes[i].Width + photo.Sizes[i].Height) >
 				(photo.Sizes[j].Width + photo.Sizes[j].Height)
 		})
 		url := photo.Sizes[0].URL
-		download(url, dest)
+		name := url[strings.LastIndex(url, "/")+1:]
+		destFilename := filepath.Join(dest, name)
+		fmt.Printf("[%d/%d] Downloading photo %s to %s\n", i+1,
+			photos.Response.Count, url, destFilename)
+		download(url, destFilename)
 	}
 	return nil
 }
@@ -73,7 +100,7 @@ func prepareDestination(dest string) (string, error) {
 	stat, err := os.Stat(dest)
 	if err != nil {
 		if os.IsNotExist(err) {
-			if err = os.MkdirAll(dest, 0744); err != nil {
+			if err = os.MkdirAll(dest, 0755); err != nil {
 				return "", err
 			}
 			return dest, nil
@@ -86,14 +113,43 @@ func prepareDestination(dest string) (string, error) {
 	return dest, nil
 }
 
+func deletePhotos(accessToken string, photos []Photo) error {
+	errCount := 0
+	count := len(photos)
+	waitTime := defaultWaitTime
+	if count == 0 {
+		return nil
+	}
+	for i, photo := range photos {
+		// VK API allows only 3 req/sec
+		if (i+1)%3 == 0 {
+			time.Sleep(1 * time.Second)
+		}
+		fmt.Printf("[%d/%d] deleting photo %d\n", i+1, count, photo.ID)
+		if err := deletePhoto(accessToken, photo); err != nil {
+			errCount++
+			if errCount > retryLimit {
+				return err
+			}
+			fmt.Printf("error %s when deleting photo %d, going to retry after %s\n",
+				err, photo.ID, waitTime)
+			time.Sleep(waitTime)
+			waitTime *= waitFactor
+		}
+	}
+	return nil
+}
+
 func main() {
 	album := flag.String("album", "saved", "Album name")
 	dest := flag.String("dest", ".", "Destination folder for saving photos")
+	dryRun := flag.Bool("dry-run", true, "If true deletes photos after save")
 	flag.Parse()
 	accessToken := os.Getenv("ACCESS_TOKEN")
 	if accessToken == "" {
 		panic("please set vk.com access token in ACCESS_TOKEN environment variable")
 	}
+	//TODO implement cycle because API returns only up to 1000 items per request
 	photos, err := getPhotosList(*album, accessToken)
 	if err != nil {
 		panic(err)
@@ -106,4 +162,13 @@ func main() {
 	if err != nil {
 		panic(err)
 	}
+	fmt.Println("all photos have been saved successfully")
+	if *dryRun {
+		return
+	}
+	err = deletePhotos(accessToken, photos.Response.Items)
+	if err != nil {
+		panic(err)
+	}
+	fmt.Println("all photos have been deleted successfully")
 }
