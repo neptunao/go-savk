@@ -141,9 +141,9 @@ func deletePhotos(accessToken string, photos []Photo) error {
 }
 
 func main() {
-	album := flag.String("album", "saved", "Album name")
-	dest := flag.String("dest", ".", "Destination folder for saving photos")
-	dryRun := flag.Bool("dry-run", true, "If true deletes photos after save")
+	album := flag.String("album", "saved", "VK album name")
+	dest := flag.String("dest", ".", "Destination folder for saved photos")
+	dryRun := flag.Bool("dry-run", true, "If false deletes photos after save")
 	flag.Parse()
 	accessToken := os.Getenv("ACCESS_TOKEN")
 	if accessToken == "" {
