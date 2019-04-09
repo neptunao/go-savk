@@ -17,10 +17,15 @@ import (
 //TODO Check for VK API errors when parsing JSON
 
 // APIVersion is vk.com API version
-const APIVersion = "5.80"
+const APIVersion = "5.92"
 const retryLimit = 5
 const defaultWaitTime = 5 * time.Second
 const waitFactor = 3
+
+// TODO: move to args/envvars
+const ownerID = 59233038
+
+var batchSize int
 
 func apiRequest(url string, out interface{}) error {
 	r, err := http.DefaultClient.Get(url)
@@ -38,9 +43,9 @@ func apiRequest(url string, out interface{}) error {
 	return nil
 }
 
-func getPhotosList(album string, accessToken string) (*GetPhotosResponse, error) {
-	url := fmt.Sprintf("https://api.vk.com/method/photos.get?access_token=%s&v=%s&album_id=%s",
-		accessToken, APIVersion, album)
+func getPhotosList(album string, accessToken string, offset int) (*GetPhotosResponse, error) {
+	url := fmt.Sprintf("https://api.vk.com/method/photos.get?access_token=%s&v=%s&album_id=%s&owner_id=%d&count=%d&offset=%d",
+		accessToken, APIVersion, album, ownerID, batchSize, offset)
 	var photos GetPhotosResponse
 	if err := apiRequest(url, &photos); err != nil {
 		return nil, err
@@ -86,7 +91,7 @@ func downloadPhotos(accessToken string, photos *GetPhotosResponse, dest string) 
 		name := url[strings.LastIndex(url, "/")+1:]
 		destFilename := filepath.Join(dest, name)
 		fmt.Printf("[%d/%d] Downloading photo %s to %s\n", i+1,
-			photos.Response.Count, url, destFilename)
+			len(photos.Response.Items), url, destFilename)
 		download(url, destFilename)
 	}
 	return nil
@@ -144,31 +149,38 @@ func main() {
 	album := flag.String("album", "saved", "VK album name")
 	dest := flag.String("dest", ".", "Destination folder for saved photos")
 	dryRun := flag.Bool("dry-run", true, "If false deletes photos after save")
+	batchSizeFlag := flag.Int("count", 10, "Batch size of photos processed in one step")
 	flag.Parse()
 	accessToken := os.Getenv("ACCESS_TOKEN")
 	if accessToken == "" {
 		panic("please set vk.com access token in ACCESS_TOKEN environment variable")
 	}
+	batchSize = *batchSizeFlag
 	//TODO implement cycle because API returns only up to 1000 items per request
-	photos, err := getPhotosList(*album, accessToken)
-	if err != nil {
-		panic(err)
+	processed := 0
+	count := 1
+	for processed < count {
+		photos, err := getPhotosList(*album, accessToken, processed)
+		if err != nil {
+			panic(err)
+		}
+		count = photos.Response.Count
+		absDest, err := prepareDestination(*dest)
+		if err != nil {
+			panic(err)
+		}
+		err = downloadPhotos(accessToken, photos, absDest)
+		if err != nil {
+			panic(err)
+		}
+		fmt.Printf("%d photos have been saved successfully\n", len(photos.Response.Items))
+		if !*dryRun {
+			err = deletePhotos(accessToken, photos.Response.Items)
+			if err != nil {
+				panic(err)
+			}
+			fmt.Printf("%d photos have been deleted successfully\n", len(photos.Response.Items))
+		}
+		processed += len(photos.Response.Items)
 	}
-	absDest, err := prepareDestination(*dest)
-	if err != nil {
-		panic(err)
-	}
-	err = downloadPhotos(accessToken, photos, absDest)
-	if err != nil {
-		panic(err)
-	}
-	fmt.Println("all photos have been saved successfully")
-	if *dryRun {
-		return
-	}
-	err = deletePhotos(accessToken, photos.Response.Items)
-	if err != nil {
-		panic(err)
-	}
-	fmt.Println("all photos have been deleted successfully")
 }
